@@ -1,0 +1,1289 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Seguimiento Importaciones</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+const SUPABASE_URL = 'https://zjticidyirudtwpwoyrx.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpqdGljaWR5aXJ1ZHR3cHdveXJ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczOTY4OTYsImV4cCI6MjA5Mjk3Mjg5Nn0.jVEizM9ss801cZNCSvfRwNbdYyeGqlXa-84BTVO1b8M';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+async function dbCargar() {
+  const { data, error } = await sb.from('importaciones').select('*').order('created_at', { ascending: true });
+  if (error) { console.error('Error cargando:', error); return null; }
+  return data.map(row => ({ ...row.datos, id: row.id, cerrada: row.cerrada }));
+}
+async function dbGuardar(imp) {
+  const payload = {
+    id: String(imp.id),
+    oc: imp.nro_oc || '',
+    proveedor: imp.proveedor || '',
+    estado: imp.trans_estado || '',
+    origen: imp.origen || '',
+    naviera: imp.trans_naviera || '',
+    cerrada: imp.cerrada || false,
+    datos: imp,
+  };
+  const { error } = await sb.from('importaciones').upsert(payload, { onConflict: 'id' });
+  if (error) console.error('Error guardando:', error);
+}
+async function dbEliminar(id) {
+  const { error } = await sb.from('importaciones').delete().eq('id', String(id));
+  if (error) console.error('Error eliminando:', error);
+}
+</script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;min-height:100vh}
+body{font-family:system-ui,sans-serif;font-size:13px;background:#f3f4f6;color:#111;padding:14px}
+input,select,textarea{font-family:inherit;font-size:12px;padding:5px 8px;border-radius:6px;border:1px solid #d1d5db;background:#fff;color:#111;width:100%}
+input:focus,select:focus,textarea:focus{outline:2px solid #6366f1;outline-offset:1px}
+button{font-family:inherit;cursor:pointer}
+table{border-collapse:collapse;width:100%}
+a{color:#2563eb;text-decoration:none}
+.tip{position:absolute;left:22px;top:-4px;background:#1e1b4b;color:#fff;border-radius:8px;padding:8px 12px;font-size:11px;white-space:pre-wrap;z-index:9999;min-width:240px;max-width:340px;line-height:1.6;box-shadow:0 4px 16px rgba(0,0,0,.3);pointer-events:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="root" style="width:100%"></div>
+<script type="text/babel">
+const {useState,useRef,useEffect,useCallback} = React;
+
+const USUARIOS = [
+  {user:'admin', pass:'imagem2026'},
+  {user:'comex', pass:'comex2026'}
+];
+
+const ESTADOS = ["EN PRODUCCIÓN","BOOKING CONFIRMADO","EN TRÁNSITO","EN ADUANA","ENTREGADO"];
+const ESTADOS_BG = {"EN PRODUCCIÓN":"#FEF08A","BOOKING CONFIRMADO":"#BAE6FD","EN TRÁNSITO":"#A5F3FC","EN ADUANA":"#FED7AA","ENTREGADO":"#BBF7D0"};
+const ESTADOS_TC = {"EN PRODUCCIÓN":"#713F12","BOOKING CONFIRMADO":"#0C447C","EN TRÁNSITO":"#0F6E56","EN ADUANA":"#854F0B","ENTREGADO":"#166534"};
+const CONTENEDORES = ["20'ST","40'ST","40'HC","LCL","FCL","AÉREO","TERRESTRE"];
+const NAVIERAS = ["DELPA","SEABRIDGE","BVL","HARTRODT","TRANSBOL","DHL","FEDEX","UPS","OTRA"];
+const PAISES = ["CHINA","USA","BRASIL","ALEMANIA","ITALIA","ESPAÑA","FRANCIA","REINO UNIDO","PAÍSES BAJOS","BÉLGICA","PORTUGAL","SUECIA","JAPÓN","COREA DEL SUR","INDIA","MÉXICO","ARGENTINA","OTRO"];
+const TIPO_DOC = ["BL — Marítimo","CRT — Terrestre","AWB — Aéreo"];
+const EUROPA = ["ALEMANIA","ITALIA","ESPAÑA","FRANCIA","REINO UNIDO","PAÍSES BAJOS","BÉLGICA","PORTUGAL","SUECIA"];
+
+const esEuropa = p => EUROPA.includes(p);
+const certRequired = p => p !== "USA";
+const certLabel = o => o === "USA" ? "N/A (USA)" : esEuropa(o) ? "REX en Invoice" : "Cert. Origen";
+
+const STEPS = [
+  {k:"proforma",l:"Proforma",desc:"Proforma recibida y monto confirmado.",color:"#EDE9FE",tc:"#4338ca"},
+  {k:"pago",l:"Pago",desc:"Transferencia SWIFT realizada al proveedor.",color:"#FEF3C7",tc:"#92400e"},
+  {k:"transito",l:"Tránsito",desc:"La mercadería salió del origen. ETD registrado.",color:"#CFFAFE",tc:"#0e7490"},
+  {k:"aduana",l:"Aduana",desc:"Docs enviados a aduana. Plazo: 10 días hábiles antes de ETA.",color:"#FEE2E2",tc:"#991b1b"},
+  {k:"llegada",l:"Llegada",desc:"Mercadería llegó a bodega.",color:"#E0E7FF",tc:"#3730a3"},
+  {k:"recepcion",l:"Ingreso OC",desc:"OC ingresada en Dimasoft. No es pago. Máx. 5 días desde llegada.",color:"#DCFCE7",tc:"#166534"},
+  {k:"ftransp",l:"F.Transp.Int",desc:"Factura embarcador internacional. Máx. 2 días post ETA.",color:"#E0E7FF",tc:"#3730a3"},
+  {k:"fnac",l:"F.Transp.Nac",desc:"Factura transportista nacional. Máx. 2 días post llegada.",color:"#FEF3C7",tc:"#92400e"},
+  {k:"cerrado",l:"Cerrado",desc:"Último pago realizado. Ciclo finalizado.",color:"#BBF7D0",tc:"#166534"},
+];
+
+const OBS = {
+  trans_eta:"SOLICITUD DEL BOOKING AL EMBARCADOR 5 DÍAS DESPUÉS DE LA ACEPTACIÓN DEL FLETE.\nACTIVAR ALARMA 5 DÍAS ANTES DE LA LLEGADA EN OUTLOOK.",
+  fact_dim:"INGRESO DE LA OC EN DIMASOFT. MÁXIMO 5 DÍAS DE LA FECHA DE LLEGADA A IMAGEM.\nNO ES UN PAGO — REPRESENTA EL INGRESO DE LA ORDEN DE COMPRA AL SISTEMA.",
+  fact_nac:"SOLICITAR ESTADO DE CUENTA A COBRANZA AG. AD. MÁXIMO 2 DÍAS DESPUÉS DE LA FECHA DE LLEGADA A IMAGEM.",
+  fact_int:"SOLICITAR FACTURA A EMBARCADOR MÁXIMO 2 DÍAS DESPUÉS DE LA FECHA DE ETA PARA ENVÍO A TESORERÍA.",
+  oc:"LA OC SE INGRESA MÁXIMO 2 DÍAS DESPUÉS DE RECIBIR LA PROFORMA.",
+  aduana:"PLAZO MÁXIMO: 10 DÍAS HÁBILES ANTES DE ETA.",
+  provisiones:"PAGO DE PROVISIONES MÁXIMO 3 DÍAS ANTES DE ETA.",
+};
+
+const DICC_INIT = [
+  {t:"ETA",d:"Estimated Time of Arrival — Fecha estimada de llegada al puerto de destino."},
+  {t:"ETD",d:"Estimated Time of Departure — Fecha estimada de salida desde el puerto de origen."},
+  {t:"BL (Bill of Lading)",d:"Conocimiento de embarque marítimo. Documento que acredita el contrato de transporte."},
+  {t:"CRT",d:"Carta de Porte Internacional por Carretera. Equivalente al BL para transporte terrestre."},
+  {t:"AWB",d:"Air Waybill — Guía aérea. Equivalente al BL para transporte aéreo."},
+  {t:"LCL",d:"Less than Container Load — Carga consolidada con otros importadores."},
+  {t:"FCL",d:"Full Container Load — Contenedor completo exclusivo."},
+  {t:"Proforma Invoice",d:"Cotización formal del proveedor. Base para emitir la OC."},
+  {t:"OC (Orden de Compra)",d:"Documento oficial de compra. Máx. 2 días después de confirmación de proforma."},
+  {t:"SWIFT",d:"Transferencia bancaria internacional para pagar al proveedor."},
+  {t:"Certificado de Origen",d:"Certifica país de fabricación. Solo China. Europa usa REX en Invoice. USA no lo requiere."},
+  {t:"REX",d:"Registered Exporter System — Sistema UE. Se declara dentro del Invoice."},
+  {t:"Provisión de Fondos",d:"Anticipo al agente de aduanas. Pago máx. 3 días antes de ETA."},
+  {t:"Dimasoft",d:"Sistema de gestión interno. Ingreso OC máx. 5 días desde llegada. No es un pago."},
+  {t:"FOB",d:"Free on Board — Proveedor entrega en puerto de origen."},
+  {t:"EXW",d:"Ex Works — Proveedor entrega en su fábrica."},
+  {t:"Agente de Aduanas",d:"Gestiona trámites aduaneros. Docs máx. 10 días hábiles antes de ETA."},
+  {t:"Flete",d:"Costo del transporte internacional."},
+  {t:"Booking",d:"Reserva de espacio en buque, avión o camión."},
+];
+
+const FORWARDERS = [
+  {nombre:"INTERNATIONAL LINE S.A.",contacto:"Marcela Quinteiros / Ejecutiva de ventas",email:"Marcela.Quinteiros@international-line.cl",fono:"+56 3 9434 5709"},
+  {nombre:"BON VOYAGE LOGISTICS CHILE SPA",contacto:"José Milano / Sales Executive",email:"BVL CHILE - Jose.Milano@bvlchile.com / Sales.Executive@bvlchile.com",fono:"+56 334682390"},
+  {nombre:"TRANSBOL CHINA LOGISTIC",contacto:"Andrea Alvez C. / Commercial Manager",email:"Andrea.Alvarez@transbolchina.cl",fono:"+56 3 4219 1114"},
+  {nombre:"A HARTRODT CHILE S A",contacto:"Sandra Ortiz / Customer Services",email:"CL/SCL Ortiz, Sandra.Ortiz@hartrodt.com",fono:"+56 2 2483 7030"},
+  {nombre:"SEA BRIDGE CHILE SPA",contacto:"Laura Vírguez / Customer Services",email:"Laura.Virguez@seabridge.cl",fono:"+56 3 4485 3240"},
+  {nombre:"SAVINO DEL BENE",contacto:"Rafael Díaz / Customer Service",email:"Rafael.Diaz@savinodelbene.com",fono:"+56 (2) 29375405 / +56 3 62070484"},
+  {nombre:"DELPA",contacto:"Paulina Zambrano / Customer Service",email:"p.zambrano@delpa.cl",fono:"+56 (2) 292 44542 / +56 342860932"},
+  {nombre:"SEEMANN GROUP",contacto:"Ignacio Maldonado / Customer Service",email:"i.maldonado@seeamanngroup.com",fono:"+56 3 84607954"},
+  {nombre:"FULL SHIPMENT",contacto:"Fernanda Domínguez / Customer Service",email:"customer.inside@fullshipment.com",fono:"Solo correo electrónico"},
+  {nombre:"AMERICA CONTAINER",contacto:"María Soledad Marín / Customer Service",email:"msoledadmarin@americacontainer.cl",fono:"+56232321511 / +56 375473608"},
+];
+
+const addD = (d, n) => { if (!d) return ""; const x = new Date(d); x.setDate(x.getDate()+n); return x.toISOString().split("T")[0]; };
+const addHabil = (d, n) => {
+  if (!d) return "";
+  const x = new Date(d); let c = 0;
+  while (c < n) { x.setDate(x.getDate()-1); const wd = x.getDay(); if (wd !== 0 && wd !== 6) c++; }
+  return x.toISOString().split("T")[0];
+};
+const fmt = d => { if (!d) return "—"; const [y,m,v] = d.split("-"); return `${v}/${m}/${y}`; };
+const daysFrom = d => { if (!d) return null; return Math.ceil((new Date(d) - new Date()) / 864e5); };
+const parseMonto = s => {
+  if (!s) return 0;
+  s = String(s).trim();
+  // Has comma → dot=thousands, comma=decimal (30.365,97 or 9.400,00)
+  if (s.includes(",")) return parseFloat(s.replace(/\./g,"").replace(",",".")) || 0;
+  // No comma, has dot → remove ALL dots (9.400 → 9400, 30.365 → 30365)
+  if (s.includes(".")) return parseFloat(s.replace(/\./g,"")) || 0;
+  return parseFloat(s) || 0;
+};
+const fmtUSD = n => n > 0 ? `USD ${n.toLocaleString("es-CL", {minimumFractionDigits:2, maximumFractionDigits:2})}` : "—";
+
+const newRow = () => ({
+  id: String(Date.now() + Math.random()), cerrada: false,
+  proveedor:"", contenedor:"", nro_oc:"", origen:"", obs_pedido:"",
+  pf_numero:"", pf_fecha_cot:"", pf_fecha_conf:"", pf_fecha_envio:"", pf_monto:"",
+  swift_fecha_ant:"", swift_anticipado:"", swift_nro_ant:"",
+  swift_fecha_total:"", swift_monto:"", swift_nro_total:"",
+  trans_tipo_doc:"", trans_naviera:"", trans_estado:"", trans_etd:"", trans_eta:"",
+  trans_bl:"", trans_flete:"", trans_comentario:"",
+  invoice_ok:false, packing_ok:false, cert_origen:false, rex_en_invoice:false, detalle_merc:false, bl_ok:false,
+  aduana_fecha:"", aduana_plazo:"",
+  llegada_fecha:"", llegada_provision:"", llegada_trf:"", detalle_mercaderia:"",
+  prov_fondos:[{id:1, numero:"", monto:"", fecha:"", fecha_plazo:""}],
+  fd_nro:"", fd_monto:"", fd_fecha:"", fd_vto:"",
+  fn_nro:"", fn_monto:"", fn_fecha:"", fn_vto:"",
+  fi_nro:"", fi_monto:"", fi_fecha:"", fi_vto:"",
+  ultimo_pago_fecha:"", ultimo_pago_desc:"",
+  dias_proceso:null, dias_transito:null,
+  docs_invoice:[], docs_packing:[], docs_bl:[], docs_cert:[], docs_detalle:[], docs_flete:[],
+  packing_url:"",
+});
+
+const getProg = r => {
+  if (r.ultimo_pago_fecha) return 8;
+  if (r.fn_nro) return 7;
+  if (r.fi_nro) return 6;
+  if (r.fd_nro) return 5;
+  if (r.llegada_fecha) return 4;
+  if (r.trans_estado === "EN ADUANA" || r.aduana_fecha) return 3;
+  if (r.trans_estado === "EN TRÁNSITO" || r.trans_etd) return 2;
+  if (r.swift_monto || r.swift_anticipado) return 1;
+  return 0;
+};
+
+const getAlarms = r => {
+  const a = [];
+  const chk = (v, l, color) => { if (!v) return; const d = daysFrom(v); if (d !== null && d <= 5) a.push({v, l, d, color}); };
+  chk(r.fn_vto, "Fact. Transp. Nacional", "#FEF3C7");
+  chk(r.fi_vto, "Fact. Transp. Internacional", "#E0E7FF");
+  if (r.trans_eta && !r.aduana_fecha) {
+    const p = addHabil(r.trans_eta, 10);
+    const d = daysFrom(p);
+    if (d !== null && d <= 5) a.push({v:p, l:"Envío docs a aduana", d, color:"#FEE2E2"});
+  }
+  if (r.trans_eta) {
+    (r.prov_fondos || []).forEach((p, i) => {
+      if (!p.fecha) {
+        const pl = addD(r.trans_eta, -3);
+        const d2 = daysFrom(pl);
+        if (d2 !== null && d2 <= 5) a.push({v:pl, l:`Pago provisión ${i+1}`, d:d2, color:"#FEF9C3"});
+      }
+    });
+  }
+  return a;
+};
+
+const canClose = r => {
+  const p = getProg(r);
+  if (p < 7) return {ok:false, msg:`Progreso incompleto — etapa ${p+1}/9 (${STEPS[p]?.l})`};
+  if (!r.invoice_ok || !r.packing_ok || !r.bl_ok || !r.detalle_merc) return {ok:false, msg:"Faltan documentos por confirmar"};
+  const archivos = (r.docs_invoice?.length||0) + (r.docs_packing?.length||0) + (r.docs_bl?.length||0);
+  if (archivos === 0) return {ok:false, msg:"Falta subir al menos un archivo"};
+  if (certRequired(r.origen) && esEuropa(r.origen) && !r.rex_en_invoice) return {ok:false, msg:"Falta confirmar REX en Invoice"};
+  if (certRequired(r.origen) && !esEuropa(r.origen) && !r.cert_origen) return {ok:false, msg:"Falta Certificado de Origen"};
+  return {ok:true, msg:""};
+};
+
+const calcMetrics = r => {
+  const ini = r.pf_fecha_cot || r.trans_etd || "";
+  const fin = r.ultimo_pago_fecha || "";
+  const dp = ini && fin ? Math.ceil((new Date(fin) - new Date(ini)) / 864e5) : null;
+  const dt = r.trans_etd && r.trans_eta ? Math.ceil((new Date(r.trans_eta) - new Date(r.trans_etd)) / 864e5) : null;
+  return {dias_proceso:dp, dias_transito:dt};
+};
+
+function Bdg({e}) {
+  if (!e) return null;
+  return <span style={{background:ESTADOS_BG[e]||"#f3f4f6",color:ESTADOS_TC[e]||"#374151",fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:99,whiteSpace:"nowrap"}}>{e}</span>;
+}
+
+function Tip({text}) {
+  const [s, setS] = useState(false);
+  if (!text) return null;
+  return <span style={{position:"relative",display:"inline-block",marginLeft:4}}>
+    <button onMouseEnter={()=>setS(true)} onMouseLeave={()=>setS(false)}
+      style={{background:"#E0E7FF",border:"none",borderRadius:99,width:17,height:17,fontSize:10,color:"#3730a3",fontWeight:700,padding:0,lineHeight:"17px"}}>?</button>
+    {s && <div className="tip">{text}</div>}
+  </span>;
+}
+
+function FZone({label, icon, files, onAdd, onRemove}) {
+  const [input, setInput] = useState("");
+  const [nombre, setNombre] = useState("");
+  const agregar = () => {
+    const url = input.trim();
+    if (!url) return;
+    onAdd({ name: nombre.trim() || label, url, type: "link" });
+    setInput(""); setNombre("");
+  };
+  return <div style={{background:"#f9fafb",borderRadius:8,border:"1px dashed #BAE6FD",padding:"8px 10px"}}>
+    <div style={{fontSize:11,fontWeight:600,marginBottom:6,color:"#0369a1"}}>{icon} {label}</div>
+    <div style={{display:"flex",gap:4,marginBottom:6,flexWrap:"wrap"}}>
+      <input type="url" value={input} onChange={e=>setInput(e.target.value)}
+        placeholder="Pegar link de OneDrive..."
+        style={{flex:2,minWidth:140,fontSize:11}}
+        onKeyDown={e=>e.key==="Enter"&&agregar()}/>
+      <input type="text" value={nombre} onChange={e=>setNombre(e.target.value)}
+        placeholder="Nombre (opcional)"
+        style={{flex:1,minWidth:90,fontSize:11}}
+        onKeyDown={e=>e.key==="Enter"&&agregar()}/>
+      <button onClick={agregar}
+        style={{fontSize:11,padding:"4px 10px",borderRadius:6,border:"none",background:"#6366f1",color:"#fff",fontWeight:700,whiteSpace:"nowrap"}}>
+        + Agregar
+      </button>
+    </div>
+    {files && files.length > 0
+      ? <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+          {files.map((f,i) => <div key={i} style={{display:"flex",alignItems:"center",gap:4,background:"#EFF6FF",border:"1px solid #BAE6FD",borderRadius:6,padding:"3px 8px"}}>
+            <button onClick={()=>{const u=f.url||f.data; if(u) window.open(u,'_blank','noopener,noreferrer');}}
+              style={{fontSize:11,color:"#2563eb",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
+                background:"none",border:"none",cursor:"pointer",padding:0,textAlign:"left"}}
+              title={f.url||f.name}>
+              🔗 {f.name||label}
+            </button>
+            <button onClick={()=>onRemove(i)} style={{background:"none",border:"none",color:"#ef4444",fontSize:13,lineHeight:1}}>×</button>
+          </div>)}
+        </div>
+      : <span style={{fontSize:11,color:"#9ca3af"}}>Sin links — pegá el link de OneDrive arriba</span>
+    }
+  </div>;
+}
+
+function USDInput({value, onChange}) {
+  const handleChange = e => {
+    let raw = e.target.value;
+    // Allow only digits, dots and commas
+    raw = raw.replace(/[^0-9.,]/g, "");
+    // Allow at most one comma (decimal separator)
+    const parts = raw.split(",");
+    if (parts.length > 2) raw = parts[0] + "," + parts.slice(1).join("");
+    // Limit decimals to 2 digits
+    if (parts.length === 2) raw = parts[0] + "," + parts[1].slice(0,2);
+    // Format thousands in integer part with dots
+    const intPart = raw.split(",")[0].replace(/\./g,"");
+    const decPart = raw.includes(",") ? "," + raw.split(",")[1] : "";
+    const formatted = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".") + decPart;
+    onChange(formatted);
+  };
+  return <div style={{position:"relative"}}>
+    <span style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",fontSize:11,color:"#6b7280",fontWeight:700,pointerEvents:"none"}}>USD</span>
+    <input type="text" value={value||""} onChange={handleChange} placeholder="0,00" style={{paddingLeft:38}}/>
+  </div>;
+}
+
+function CLPInput({value, onChange}) {
+  const handleChange = e => {
+    const raw = e.target.value.replace(/[^0-9]/g, "");
+    onChange(raw ? parseInt(raw,10).toLocaleString("es-CL") : "");
+  };
+  return <div style={{position:"relative"}}>
+    <span style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",fontSize:11,color:"#6b7280",fontWeight:700,pointerEvents:"none"}}>$</span>
+    <input type="text" value={value||""} onChange={handleChange} placeholder="0" style={{paddingLeft:22}}/>
+  </div>;
+}
+
+function ForwarderView() {
+  return <div>
+    <div style={{fontSize:15,fontWeight:700,marginBottom:2}}>📞 Contactos Forwarders</div>
+    <div style={{fontSize:12,color:"#6b7280",marginBottom:14}}>Directorio de agentes de carga y embarcadores.</div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10}}>
+      {FORWARDERS.map((fw,i) => <div key={i} style={{background:"#fff",borderRadius:10,border:"1px solid #BAE6FD",padding:"14px"}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#0369a1",marginBottom:8,paddingBottom:6,borderBottom:"1px solid #e0f2fe"}}>{fw.nombre}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>
+          <div style={{display:"flex",gap:6,alignItems:"flex-start",fontSize:12}}>
+            <span style={{fontSize:13,flexShrink:0}}>👤</span>
+            <span style={{color:"#374151"}}>{fw.contacto}</span>
+          </div>
+          <div style={{display:"flex",gap:6,alignItems:"flex-start",fontSize:12}}>
+            <span style={{fontSize:13,flexShrink:0}}>✉️</span>
+            <span style={{color:"#2563eb",wordBreak:"break-all"}}>{fw.email}</span>
+          </div>
+          <div style={{display:"flex",gap:6,alignItems:"flex-start",fontSize:12}}>
+            <span style={{fontSize:13,flexShrink:0}}>📱</span>
+            <span style={{color:"#374151"}}>{fw.fono}</span>
+          </div>
+        </div>
+      </div>)}
+    </div>
+  </div>;
+}
+
+function ProgBar({step, expanded}) {
+  return <div>
+    <div style={{display:"flex",gap:2,marginBottom:expanded?8:2}}>
+      {STEPS.map((_,i) => <div key={i} style={{flex:1,height:6,borderRadius:3,background:i<step?"#6366f1":i===step?"#a5b4fc":"#e5e7eb"}}/>)}
+    </div>
+    {expanded && <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+      {STEPS.map((s,i) => <div key={i} style={{background:i<=step?s.color:"#f9fafb",border:`1px solid ${i<=step?"#6366f1":"#e5e7eb"}`,borderRadius:8,padding:"6px 10px",minWidth:90,flex:1,opacity:i>step?0.5:1}}>
+        <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:3}}>
+          <span style={{width:18,height:18,borderRadius:99,background:i<step?"#6366f1":i===step?"#a5b4fc":"#e5e7eb",color:"#fff",fontSize:10,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{i+1}</span>
+          <span style={{fontSize:11,fontWeight:700,color:i<=step?s.tc:"#9ca3af"}}>{s.l}</span>
+          {i===step && <span style={{fontSize:9,background:"#6366f1",color:"#fff",padding:"1px 5px",borderRadius:99,fontWeight:700}}>ACTUAL</span>}
+          {i<step && <span style={{fontSize:9,color:"#166534"}}>✓</span>}
+        </div>
+        <div style={{fontSize:10,color:"#6b7280",lineHeight:1.4}}>{s.desc}</div>
+      </div>)}
+    </div>}
+  </div>;
+}
+
+function RowDetail({row, upd, addDoc, rmDoc, addProv, updProv, delProv, toggleC, delRow, isGestion}) {
+  const [expS, setExpS] = useState(null);
+  const p = getProg(row);
+  const cl = canClose(row);
+  const ant = parseMonto(row.swift_anticipado);
+  const saldo = parseMonto(row.swift_monto);
+  const proforma = parseMonto(row.pf_monto);
+  const totalPagado = ant > 0 ? ant + saldo : saldo;
+  const pagoCompleto = proforma > 0 && totalPagado > 0 && Math.abs(totalPagado - proforma) < 1;
+  const balance = proforma > 0 && totalPagado > 0 ? proforma - totalPagado : 0;
+
+  const SECS = [
+    {k:"proforma",l:"📋 Proforma",bg:"#EDE9FE"},{k:"pago",l:"💳 Pago",bg:"#FEF3C7"},
+    {k:"transporte",l:"🚢 Transporte",bg:"#CFFAFE"},{k:"documentos",l:"📄 Documentos",bg:"#DCFCE7"},
+    {k:"aduana",l:"🏛️ Aduana",bg:"#FEE2E2"},{k:"llegada",l:"📦 Llegada a IMAGEM",bg:"#E0E7FF"},
+    {k:"provisiones",l:"💰 Provisiones",bg:"#FEF9C3"},{k:"facturas",l:"🧾 Facturas",bg:"#F0FDF4"},
+    {k:"cierre",l:"🔒 Cierre",bg:"#F3F4F6"},
+  ];
+
+  return <div style={{padding:"12px 14px"}}>
+    <div style={{marginBottom:12,background:"#fff",borderRadius:10,border:"1px solid #e5e7eb",padding:"12px 14px"}}>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:8,color:"#4338ca"}}>📊 Estado del proceso</div>
+      <ProgBar step={p} expanded={true}/>
+    </div>
+    <div style={{marginBottom:10,background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"10px 12px"}}>
+      <div style={{fontSize:11,color:"#6b7280",marginBottom:4,fontWeight:700}}>📝 Observación del pedido</div>
+      <textarea value={row.obs_pedido||""} onChange={e=>upd(row.id,"obs_pedido",e.target.value)} rows={2} placeholder="Notas generales..." style={{resize:"vertical"}}/>
+    </div>
+    <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
+      {SECS.map(s => <button key={s.k} onClick={()=>setExpS(expS===s.k?null:s.k)}
+        style={{padding:"4px 11px",borderRadius:20,fontSize:11,background:expS===s.k?s.bg:"#fff",
+          border:expS===s.k?"2px solid #6366f1":"1px solid #d1d5db",fontWeight:expS===s.k?700:400}}>{s.l}</button>)}
+    </div>
+    {!expS && <p style={{fontSize:12,color:"#9ca3af"}}>Seleccioná una sección.</p>}
+
+    {expS==="proforma" && <div style={{background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"12px"}}>
+      <div style={{background:"#FEF9C3",borderRadius:8,padding:"8px 12px",marginBottom:10,fontSize:12,color:"#854F0B",border:"1px solid #FCD34D"}}>
+        <strong>💡 OC:</strong> Fecha ingreso OC = máx. 2 días desde confirmación. <Tip text={OBS.oc}/>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8}}>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Origen (país)</div>
+          <select value={row.origen||""} onChange={e=>upd(row.id,"origen",e.target.value)}>
+            <option value="">Seleccionar</option>
+            {PAISES.map(o => <option key={o}>{o}</option>)}
+          </select>
+        </div>
+        {[["Proveedor","proveedor"],["N° OC","nro_oc"],["N° Proforma","pf_numero"]].map(([l,k]) => (
+          <div key={k}><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>{l}</div>
+          <input type="text" value={row[k]||""} onChange={e=>upd(row.id,k,e.target.value)}/></div>
+        ))}
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Monto proforma</div>
+          <USDInput value={row.pf_monto||""} onChange={v=>upd(row.id,"pf_monto",v)}/>
+        </div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Fecha cotización</div>
+          <input type="date" value={row.pf_fecha_cot||""} onChange={e=>{
+            upd(row.id,"pf_fecha_cot",e.target.value);
+            if (e.target.value && !row.pf_fecha_conf) upd(row.id,"pf_fecha_conf",addD(e.target.value,2));
+          }}/></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Fecha confirmación <span style={{color:"#6366f1",fontSize:10}}>(auto)</span></div>
+          <input type="date" value={row.pf_fecha_conf||""} onChange={e=>upd(row.id,"pf_fecha_conf",e.target.value)}/></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Fecha ingreso OC</div>
+          <input type="date" value={row.pf_fecha_envio||""} onChange={e=>upd(row.id,"pf_fecha_envio",e.target.value)}/></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Contenedor</div>
+          <select value={row.contenedor||""} onChange={e=>upd(row.id,"contenedor",e.target.value)}>
+            <option value="">Seleccionar</option>
+            {CONTENEDORES.map(c => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div style={{gridColumn:"1/-1"}}><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Detalle mercadería</div>
+          <input type="text" value={row.detalle_mercaderia||""} onChange={e=>upd(row.id,"detalle_mercaderia",e.target.value)} placeholder="Descripción..."/>
+        </div>
+      </div>
+    </div>}
+
+    {expS==="pago" && <div style={{background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"12px"}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8,marginBottom:12}}>
+        {[["Monto anticipado","swift_anticipado",true],["N° Transf. anticipado","swift_nro_ant",false],["Fecha pago anticipado","swift_fecha_ant",false],
+          ["Monto pagado / saldo restante","swift_monto",true],["N° Transf. pago","swift_nro_total",false],["Fecha pago","swift_fecha_total",false]].map(([l,k,usd]) => (
+          <div key={k}><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>{l}</div>
+          {usd ? <USDInput value={row[k]||""} onChange={v=>upd(row.id,k,v)}/>
+               : <input type={k.includes("fecha")?"date":"text"} value={row[k]||""} onChange={e=>upd(row.id,k,e.target.value)}/>}
+          </div>
+        ))}
+      </div>
+      <div style={{background:"#F5F3FF",borderRadius:8,padding:"10px 14px",border:"1px solid #c4b5fd"}}>
+        <div style={{fontSize:12,fontWeight:700,color:"#4338ca",marginBottom:6}}>💰 Balance de pagos</div>
+        {pagoCompleto && <div style={{background:"#BBF7D0",borderRadius:6,padding:"6px 10px",marginBottom:8,fontSize:12,color:"#166534",fontWeight:700}}>
+          ✓ Pago completado — coincide con proforma ({fmtUSD(proforma)})
+        </div>}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+          <div style={{textAlign:"center",background:"#fff",borderRadius:8,padding:"8px"}}>
+            <div style={{fontSize:11,color:"#6b7280"}}>Anticipado</div>
+            <div style={{fontSize:15,fontWeight:700,color:"#854F0B"}}>{fmtUSD(ant)}</div>
+            {row.swift_fecha_ant && <div style={{fontSize:10,color:"#9ca3af"}}>{fmt(row.swift_fecha_ant)}</div>}
+            {row.swift_nro_ant && <div style={{fontSize:10,color:"#6366f1"}}>TRF: {row.swift_nro_ant}</div>}
+          </div>
+          <div style={{textAlign:"center",background:"#fff",borderRadius:8,padding:"8px"}}>
+            <div style={{fontSize:11,color:"#6b7280"}}>{ant>0?"Saldo restante":"Monto pagado"}</div>
+            <div style={{fontSize:15,fontWeight:700,color:"#166534"}}>{fmtUSD(saldo)}</div>
+            {row.swift_fecha_total && <div style={{fontSize:10,color:"#9ca3af"}}>{fmt(row.swift_fecha_total)}</div>}
+            {row.swift_nro_total && <div style={{fontSize:10,color:"#6366f1"}}>TRF: {row.swift_nro_total}</div>}
+          </div>
+          <div style={{textAlign:"center",background:"#fff",borderRadius:8,padding:"8px"}}>
+            <div style={{fontSize:11,color:"#6b7280"}}>Balance</div>
+            {totalPagado > 0
+              ? <div style={{fontSize:13,fontWeight:700,color:pagoCompleto?"#166534":balance>0?"#991B1B":"#374151"}}>
+                  {pagoCompleto?"✓ Completo":balance>0?`${fmtUSD(balance)} pend.`:`${fmtUSD(Math.abs(balance))} a favor`}
+                </div>
+              : <div style={{fontSize:13,color:"#9ca3af"}}>—</div>
+            }
+          </div>
+        </div>
+      </div>
+    </div>}
+
+    {expS==="transporte" && <div style={{background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"12px"}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8}}>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Estado</div>
+          <select value={row.trans_estado||""} onChange={e=>upd(row.id,"trans_estado",e.target.value)} style={{background:ESTADOS_BG[row.trans_estado]||"#fff"}}>
+            <option value="">Sin estado</option>
+            {ESTADOS.map(e => <option key={e}>{e}</option>)}
+          </select>
+        </div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Naviera / Ruta</div>
+          <select value={row.trans_naviera||""} onChange={e=>upd(row.id,"trans_naviera",e.target.value)}>
+            <option value="">Seleccionar</option>
+            {NAVIERAS.map(n => <option key={n}>{n}</option>)}
+          </select>
+        </div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Tipo documento</div>
+          <select value={row.trans_tipo_doc||""} onChange={e=>upd(row.id,"trans_tipo_doc",e.target.value)}>
+            <option value="">Seleccionar</option>
+            {TIPO_DOC.map(t => <option key={t}>{t}</option>)}
+          </select>
+        </div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>N° {row.trans_tipo_doc?row.trans_tipo_doc.split(" ")[0]:"BL/CRT/AWB"}</div>
+          <input type="text" value={row.trans_bl||""} onChange={e=>upd(row.id,"trans_bl",e.target.value)}/></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>ETD (salida)</div>
+          <input type="date" value={row.trans_etd||""} onChange={e=>upd(row.id,"trans_etd",e.target.value)}/></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Flete USD/EUR</div>
+          <input type="text" value={row.trans_flete||""} onChange={e=>upd(row.id,"trans_flete",e.target.value)}/></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600,display:"flex",alignItems:"center"}}>ETA (llegada)<Tip text={OBS.trans_eta}/></div>
+          <input type="date" value={row.trans_eta||""} onChange={e=>{
+            upd(row.id,"trans_eta",e.target.value);
+            if (e.target.value && !row.aduana_plazo) upd(row.id,"aduana_plazo",addHabil(e.target.value,10));
+          }}/></div>
+        <div style={{gridColumn:"1/-1"}}><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Comentarios</div>
+          <textarea value={row.trans_comentario||""} onChange={e=>upd(row.id,"trans_comentario",e.target.value)} rows={2} style={{resize:"vertical"}}/>
+        </div>
+      </div>
+    </div>}
+
+    {expS==="documentos" && <div style={{background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"12px"}}>
+      {row.origen==="USA" && <div style={{background:"#EFF6FF",border:"1px solid #BFDBFE",borderRadius:8,padding:"8px 12px",marginBottom:10,fontSize:12,color:"#1e40af"}}>
+        ℹ️ <strong>Origen USA:</strong> No se requiere Certificado de Origen.
+      </div>}
+      {esEuropa(row.origen) && <div style={{background:"#F0FDF4",border:"1px solid #86EFAC",borderRadius:8,padding:"8px 12px",marginBottom:10,fontSize:12,color:"#166534"}}>
+        ℹ️ <strong>Origen {row.origen}:</strong> El REX se declara dentro del Invoice.
+      </div>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:8,marginBottom:12}}>
+        {[
+          ["invoice_ok","Invoice"],["packing_ok","Packing List"],["bl_ok","BL/CRT/AWB"],
+          ...(row.origen==="USA"?[]:esEuropa(row.origen)?[["rex_en_invoice","REX en Invoice ✓"]]:[["cert_origen","Cert. Origen"]]),
+          ["detalle_merc","Det. Mercadería"],
+        ].map(([k,l]) => (
+          <label key={k} style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",fontSize:12,
+            background:row[k]?"#f0fdf4":"#f9fafb",border:`1px solid ${row[k]?"#86EFAC":"#e5e7eb"}`,borderRadius:8,padding:"6px 8px"}}>
+            <input type="checkbox" checked={!!row[k]} onChange={e=>upd(row.id,k,e.target.checked)} style={{width:14,height:14}}/>
+            <span style={{color:row[k]?"#166534":"#6b7280",fontWeight:row[k]?700:400}}>{row[k]?"✓ ":""}{l}</span>
+          </label>
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        {[{key:"docs_invoice",label:"Invoice",icon:"📄"},{key:"docs_packing",label:"Packing List",icon:"📦"},
+          {key:"docs_bl",label:row.trans_tipo_doc?row.trans_tipo_doc.split(" ")[0]:"BL/CRT/AWB",icon:"🚢"},
+          ...(row.origen!=="USA"&&!esEuropa(row.origen)?[{key:"docs_cert",label:"Cert. Origen",icon:"📜"}]:[]),
+          {key:"docs_detalle",label:"Det. Mercadería",icon:"📋"}].map(dt => (
+          <FZone key={dt.key} label={dt.label} icon={dt.icon} files={row[dt.key]||[]}
+            onAdd={f=>addDoc(row.id,dt.key,f)} onRemove={i=>rmDoc(row.id,dt.key,i)}/>
+        ))}
+      </div>
+      <div style={{marginTop:10,background:"#F0FDF4",borderRadius:8,border:"1px solid #86EFAC",padding:"10px 12px"}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#166534",marginBottom:4}}>🔗 Link Packing List (visible en Bodega sin login)</div>
+        <div style={{fontSize:11,color:"#6b7280",marginBottom:6}}>Pegá aquí el enlace de OneDrive. Cualquier persona puede abrirlo desde la vista de Bodega sin necesidad de login.</div>
+        <div style={{display:"flex",gap:4}}>
+          <input type="url" value={row.packing_url||""} onChange={e=>upd(row.id,"packing_url",e.target.value)} placeholder="https://onedrive.live.com/..."/>
+          {row.packing_url && <button onClick={()=>window.open(row.packing_url,'_blank','noopener,noreferrer')}
+            style={{fontSize:11,padding:"4px 10px",borderRadius:6,background:"#EFF6FF",color:"#2563eb",border:"1px solid #BAE6FD",whiteSpace:"nowrap",cursor:"pointer"}}>
+            🔗 Abrir
+          </button>}
+        </div>
+      </div>
+      <div style={{marginTop:10,background:"#EEF2FF",borderRadius:8,border:"1px solid #A5B4FC",padding:"10px 12px"}}>
+        <div style={{fontSize:12,fontWeight:700,color:"#3730a3",marginBottom:8}}>📎 Respaldos</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          {[
+            {k:"respaldo_cotizacion_url", label:"Respaldo de negociación", icon:"🤝"},
+            {k:"respaldo_flete_url",      label:"Cotización de flete",     icon:"📋"},
+          ].map(({k,label,icon}) => (
+            <div key={k} style={{background:"#fff",borderRadius:8,border:"1px dashed #A5B4FC",padding:"8px 10px"}}>
+              <div style={{fontSize:11,fontWeight:600,color:"#4338ca",marginBottom:4}}>{icon} {label}</div>
+              <div style={{display:"flex",gap:4}}>
+                <input type="url" value={row[k]||""} onChange={e=>upd(row.id,k,e.target.value)}
+                  placeholder="Pegar link de OneDrive..." style={{fontSize:11}}/>
+                {row[k] && <button onClick={()=>window.open(row[k],'_blank','noopener,noreferrer')}
+                  style={{fontSize:11,padding:"4px 10px",borderRadius:6,background:"#EFF6FF",color:"#2563eb",border:"1px solid #BAE6FD",whiteSpace:"nowrap",cursor:"pointer"}}>
+                  🔗 Abrir
+                </button>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>}
+
+    {expS==="aduana" && <div style={{background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"12px"}}>
+      <div style={{background:"#FEE2E2",borderRadius:8,padding:"8px 12px",marginBottom:10,fontSize:12,color:"#991B1B",border:"1px solid #FCA5A5"}}>
+        ⚠ <strong>Plazo máximo:</strong> 10 días hábiles antes de ETA. <Tip text={OBS.aduana}/>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8}}>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Fecha envío docs</div>
+          <input type="date" value={row.aduana_fecha||""} onChange={e=>upd(row.id,"aduana_fecha",e.target.value)}/></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Plazo máx. <span style={{color:"#6366f1",fontSize:10}}>(auto)</span></div>
+          <input type="date" value={row.aduana_plazo||""} onChange={e=>upd(row.id,"aduana_plazo",e.target.value)}/>
+          {row.aduana_plazo && !row.aduana_fecha && daysFrom(row.aduana_plazo) <= 5 &&
+            <div style={{fontSize:11,color:"#991B1B",fontWeight:700,marginTop:3}}>🔔 Vence en {daysFrom(row.aduana_plazo)}d</div>}
+        </div>
+      </div>
+    </div>}
+
+    {expS==="llegada" && <div style={{background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"12px"}}>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:8,color:"#3730a3"}}>📦 Llegada a IMAGEM</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8}}>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Fecha llegada a IMAGEM</div>
+          <input type="date" value={row.llegada_fecha||""} onChange={e=>upd(row.id,"llegada_fecha",e.target.value)}/>
+        </div>
+      </div>
+    </div>}
+
+    {expS==="provisiones" && <div style={{background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"12px"}}>
+      <div style={{background:"#FEF9C3",borderRadius:8,padding:"8px 12px",marginBottom:8,fontSize:12,color:"#854F0B",border:"1px solid #FCD34D"}}>
+        💡 <strong>Plazo:</strong> máximo 3 días antes de ETA. <Tip text={OBS.provisiones}/>
+      </div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+        <span style={{fontSize:13,fontWeight:700}}>💰 Provisiones de fondos</span>
+        <button onClick={()=>addProv(row.id)} style={{fontSize:11,padding:"3px 10px",borderRadius:6,border:"1px solid #6366f1",background:"#EDE9FE",color:"#4338ca"}}>+ Agregar</button>
+      </div>
+      {(row.prov_fondos||[]).map((pv,pi) => {
+        const plazoAuto = row.trans_eta ? addD(row.trans_eta,-3) : "";
+        const plazoFinal = pv.fecha_plazo || plazoAuto;
+        const dP = plazoFinal ? daysFrom(plazoFinal) : null;
+        return <div key={pv.id} style={{borderRadius:8,border:"1px solid #e5e7eb",padding:"8px 10px",marginBottom:6,background:"#FFFBEB"}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <span style={{fontSize:12,fontWeight:700,color:"#6b7280"}}>
+              Provisión {pi+1}
+              {dP !== null && dP <= 3 && !pv.fecha && <span style={{marginLeft:6,fontSize:11,background:"#FEE2E2",color:"#991B1B",padding:"1px 6px",borderRadius:99,fontWeight:700}}>🔔 {dP}d</span>}
+            </span>
+            {(row.prov_fondos||[]).length > 1 && <button onClick={()=>delProv(row.id,pv.id)} style={{background:"none",border:"none",color:"#ef4444",fontSize:14}}>✕</button>}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:8}}>
+            {[["N° Provisión","numero","text"],["Fecha de pago","fecha","date"]].map(([l,k,t]) => (
+              <div key={k}><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>{l}</div>
+              <input type={t} value={pv[k]||""} onChange={e=>updProv(row.id,pv.id,k,e.target.value)}/></div>
+            ))}
+            <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Monto</div>
+              <CLPInput value={pv.monto||""} onChange={v=>updProv(row.id,pv.id,"monto",v)}/>
+            </div>
+            <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Plazo máx. <span style={{color:"#6366f1",fontSize:10}}>(auto)</span></div>
+              <input type="date" value={pv.fecha_plazo||plazoAuto} onChange={e=>updProv(row.id,pv.id,"fecha_plazo",e.target.value)}/>
+            </div>
+          </div>
+          <div style={{marginTop:8}}>
+            <div style={{background:"#f9fafb",borderRadius:8,border:"1px dashed #BAE6FD",padding:"8px 10px"}}>
+              <div style={{fontSize:11,fontWeight:600,color:"#0369a1",marginBottom:4}}>🔗 Link comprobante (OneDrive)</div>
+              <div style={{display:"flex",gap:4}}>
+                <input type="url" value={pv.docs_prov_url||""} onChange={e=>updProv(row.id,pv.id,"docs_prov_url",e.target.value)}
+                  placeholder="Pegar link de OneDrive..." style={{fontSize:11}}/>
+                {pv.docs_prov_url && <button onClick={()=>window.open(pv.docs_prov_url,'_blank','noopener,noreferrer')}
+                  style={{fontSize:11,padding:"4px 10px",borderRadius:6,background:"#EFF6FF",color:"#2563eb",border:"1px solid #BAE6FD",whiteSpace:"nowrap",cursor:"pointer"}}>
+                  🔗 Abrir
+                </button>}
+              </div>
+            </div>
+          </div>
+        </div>;
+      })}
+    </div>}
+
+    {expS==="facturas" && <div style={{background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"12px"}}>
+      {/* SUB-SECCIÓN: Recepción de Mercaderías */}
+      <div style={{marginBottom:16}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#854F0B",marginBottom:8,padding:"6px 10px",background:"#FFF7ED",borderRadius:8,border:"1px solid #FED7AA"}}>
+          📦 Recepción de Mercaderías
+        </div>
+        {[
+          {pre:"fd",title:"🧾 Ingreso OC / Dimasoft",bg:"#FFF7ED",bc:"#FED7AA",tc:"#854F0B",obsKey:"fact_dim",d:5,refK:"fd_fecha"},
+        ].map(f => <div key={f.pre} style={{marginBottom:8,padding:"10px 12px",background:f.bg,borderRadius:8,border:`1px solid ${f.bc}`}}>
+          <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:8}}>
+            <span style={{fontSize:13,fontWeight:700,color:f.tc}}>{f.title}</span>
+            <Tip text={OBS[f.obsKey]}/>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:8}}>
+            {[["N° OC",`${f.pre}_nro`,"text"],["Fecha ingreso",`${f.pre}_fecha`,"date"]].map(([l,k,t]) => (
+              <div key={k}><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>{l}</div>
+              <input type={t} value={row[k]||""} onChange={e=>upd(row.id,k,e.target.value)}/></div>
+            ))}
+          </div>
+        </div>)}
+      </div>
+      {/* SUB-SECCIÓN: Recepción de Facturas */}
+      <div>
+        <div style={{fontSize:13,fontWeight:700,color:"#3730a3",marginBottom:8,padding:"6px 10px",background:"#EEF2FF",borderRadius:8,border:"1px solid #A5B4FC"}}>
+          🧾 Recepción de Facturas
+        </div>
+        {[
+          {pre:"fn",title:"🚛 Factura Transporte Nacional",bg:"#F0FDF4",bc:"#86EFAC",tc:"#166534",obsKey:"fact_nac",d:2,refK:"fn_fecha",clp:true},
+          {pre:"fi",title:"✈️ Factura Transporte Internacional",bg:"#EEF2FF",bc:"#A5B4FC",tc:"#3730a3",obsKey:"fact_int",d:2,refK:"fi_fecha",clp:false},
+        ].map(f => <div key={f.pre} style={{marginBottom:12,padding:"10px 12px",background:f.bg,borderRadius:8,border:`1px solid ${f.bc}`}}>
+          <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:8}}>
+            <span style={{fontSize:13,fontWeight:700,color:f.tc}}>{f.title}</span>
+            <Tip text={OBS[f.obsKey]}/>
+            {row[`${f.pre}_vto`] && daysFrom(row[`${f.pre}_vto`]) <= 5 && (
+              <span style={{fontSize:11,background:"#FEE2E2",color:"#991B1B",padding:"1px 7px",borderRadius:99,fontWeight:700}}>
+                🔔 Vence {daysFrom(row[`${f.pre}_vto`])===0?"hoy":`en ${daysFrom(row[`${f.pre}_vto`])}d`}
+              </span>
+            )}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:8}}>
+            {[["N° Factura",`${f.pre}_nro`,"text"],["Fecha",`${f.pre}_fecha`,"date"],["Vencimiento",`${f.pre}_vto`,"date"]].map(([l,k,t]) => (
+              <div key={k}><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>{l}</div>
+              <input type={t} value={row[k]||""} onChange={e=>{
+                upd(row.id,k,e.target.value);
+                if (k===f.refK && !row[`${f.pre}_vto`]) upd(row.id,`${f.pre}_vto`,addD(e.target.value,f.d));
+              }}/></div>
+            ))}
+            <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Monto {f.clp?"(CLP)":"(USD)"}</div>
+              {f.clp
+                ? <CLPInput value={row[`${f.pre}_monto`]||""} onChange={v=>upd(row.id,`${f.pre}_monto`,v)}/>
+                : <USDInput value={row[`${f.pre}_monto`]||""} onChange={v=>upd(row.id,`${f.pre}_monto`,v)}/>
+              }
+            </div>
+          </div>
+        </div>)}
+      </div>
+    </div>}
+
+    {expS==="cierre" && <div style={{background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",padding:"12px"}}>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>🔒 Cierre de importación</div>
+      {!cl.ok && <div style={{background:"#FEE2E2",borderRadius:8,padding:"10px 12px",marginBottom:12,fontSize:12,color:"#991B1B",border:"1px solid #FCA5A5"}}>⚠ No se puede cerrar: <strong>{cl.msg}</strong></div>}
+      {cl.ok && <div style={{background:"#DCFCE7",borderRadius:8,padding:"10px 12px",marginBottom:12,fontSize:12,color:"#166534",border:"1px solid #86EFAC"}}>✓ Todo completo — puede cerrarse.</div>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8,marginBottom:12}}>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Fecha último pago</div>
+          <input type="date" value={row.ultimo_pago_fecha||""} onChange={e=>upd(row.id,"ultimo_pago_fecha",e.target.value)}/></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Descripción</div>
+          <input type="text" value={row.ultimo_pago_desc||""} onChange={e=>upd(row.id,"ultimo_pago_desc",e.target.value)} placeholder="Ej: Pago final DELPA"/></div>
+      </div>
+      <button onClick={()=>{if(cl.ok){const m=calcMetrics(row);upd(row.id,"dias_proceso",m.dias_proceso);upd(row.id,"dias_transito",m.dias_transito);toggleC(row.id);}}}
+        disabled={!cl.ok}
+        style={{padding:"8px 18px",borderRadius:8,background:cl.ok?"#374151":"#d1d5db",color:"#fff",border:"none",fontSize:13,fontWeight:700,cursor:cl.ok?"pointer":"not-allowed"}}>
+        🔒 Marcar como cerrada
+      </button>
+      {isGestion && <button onClick={()=>delRow(row.id)} style={{marginLeft:8,padding:"8px 18px",borderRadius:8,background:"none",color:"#ef4444",border:"1px solid #ef4444",fontSize:13,fontWeight:700}}>✕ Eliminar</button>}
+    </div>}
+  </div>;
+}
+
+function LoginScreen({onLogin, onPublic}) {
+  const [user, setUser] = useState("");
+  const [pass, setPass] = useState("");
+  const [err, setErr] = useState("");
+  const [show, setShow] = useState(false);
+  const intentar = () => {
+    const ok = USUARIOS.find(u => u.user === user.trim() && u.pass === pass);
+    if (ok) { onLogin(user.trim()); }
+    else { setErr("Usuario o contraseña incorrectos"); setPass(""); }
+  };
+  return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f3f4f6",flexDirection:"column",gap:16}}>
+    <div style={{background:"#fff",borderRadius:16,padding:"36px 40px",width:340,boxShadow:"0 4px 24px rgba(0,0,0,.08)",border:"1px solid #e5e7eb"}}>
+      <div style={{textAlign:"center",marginBottom:24}}>
+        <div style={{fontSize:32,marginBottom:8}}>📦</div>
+        <h1 style={{fontSize:18,fontWeight:700,margin:0}}>Seguimiento de Importaciones</h1>
+        <p style={{fontSize:12,color:"#6b7280",marginTop:4}}>Ingresá tus credenciales</p>
+      </div>
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:11,color:"#6b7280",marginBottom:4,fontWeight:600}}>Usuario</div>
+        <input value={user} onChange={e=>setUser(e.target.value)} placeholder="Usuario" onKeyDown={e=>e.key==="Enter"&&intentar()}/>
+      </div>
+      <div style={{marginBottom:16}}>
+        <div style={{fontSize:11,color:"#6b7280",marginBottom:4,fontWeight:600}}>Contraseña</div>
+        <div style={{position:"relative"}}>
+          <input value={pass} onChange={e=>setPass(e.target.value)} placeholder="Contraseña"
+            type={show?"text":"password"} onKeyDown={e=>e.key==="Enter"&&intentar()} style={{paddingRight:36}}/>
+          <button onClick={()=>setShow(s=>!s)}
+            style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:"#9ca3af",fontSize:15}}>
+            {show?"🙈":"👁"}
+          </button>
+        </div>
+      </div>
+      {err && <div style={{background:"#FEE2E2",color:"#991B1B",borderRadius:8,padding:"8px 12px",fontSize:12,marginBottom:12,fontWeight:600}}>⚠ {err}</div>}
+      <button onClick={intentar} style={{width:"100%",padding:"10px",borderRadius:8,background:"#6366f1",color:"#fff",border:"none",fontSize:13,fontWeight:700}}>
+        Ingresar
+      </button>
+    </div>
+    <button onClick={onPublic} style={{fontSize:12,color:"#6366f1",background:"none",border:"none",textDecoration:"underline",cursor:"pointer"}}>
+      👁 Ver sin login (Bodega y Calendario)
+    </button>
+  </div>;
+}
+
+function App() {
+  const [data, setData] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  const [guardando, setGuardando] = useState(false);
+  const [errorConex, setErrorConex] = useState(false);
+  const [dicc, setDicc] = useState(DICC_INIT);
+  const [view, setView] = useState("bodega"); // Vista pública por defecto — sin login
+  const [sesion, setSesion] = useState(null);
+  const [expR, setExpR] = useState(null);
+  const [fE, setFE] = useState("TODOS");
+  const [search, setSearch] = useState("");
+  const [showProg, setShowProg] = useState({});
+  const saveTimer = useRef({});
+
+  useEffect(() => {
+    (async () => {
+      const rows = await dbCargar();
+      if (rows === null) { setErrorConex(true); }
+      else setData(rows);
+      setCargando(false);
+    })();
+  }, []);
+
+  const guardarDebounced = useCallback((imp) => {
+    const id = imp.id;
+    if (saveTimer.current[id]) clearTimeout(saveTimer.current[id]);
+    setGuardando(true);
+    saveTimer.current[id] = setTimeout(async () => {
+      await dbGuardar(imp);
+      setGuardando(false);
+    }, 1000);
+  }, []);
+
+  const upd = (id, k, v) => setData(d => {
+    const next = d.map(r => r.id === id ? {...r, [k]:v} : r);
+    const updated = next.find(r => r.id === id);
+    if (updated) guardarDebounced(updated);
+    return next;
+  });
+  const addRow = () => { const x = newRow(); setData(d => [...d, x]); setExpR(x.id); dbGuardar(x); };
+  const delRow = async id => { setData(d => d.filter(r => r.id !== id)); if (expR === id) setExpR(null); await dbEliminar(id); };
+  const toggleC = id => setData(d => { const next = d.map(r => r.id === id ? {...r, cerrada:!r.cerrada} : r); const u = next.find(r => r.id === id); if (u) dbGuardar(u); return next; });
+  const addDoc = (rid, f, file) => setData(d => { const next = d.map(r => r.id === rid ? {...r, [f]:[...(r[f]||[]),file]} : r); const u = next.find(r => r.id === rid); if (u) guardarDebounced(u); return next; });
+  const rmDoc = (rid, f, i) => setData(d => { const next = d.map(r => r.id === rid ? {...r, [f]:(r[f]||[]).filter((_,j) => j !== i)} : r); const u = next.find(r => r.id === rid); if (u) guardarDebounced(u); return next; });
+  const addProv = id => setData(d => { const next = d.map(r => r.id === id ? {...r, prov_fondos:[...(r.prov_fondos||[]),{id:Date.now(),numero:"",monto:"",fecha:"",fecha_plazo:""}]} : r); const u = next.find(r => r.id === id); if (u) guardarDebounced(u); return next; });
+  const updProv = (rid, pid, k, v) => setData(d => { const next = d.map(r => r.id === rid ? {...r, prov_fondos:(r.prov_fondos||[]).map(p => p.id === pid ? {...p,[k]:v} : p)} : r); const u = next.find(r => r.id === rid); if (u) guardarDebounced(u); return next; });
+  const delProv = (rid, pid) => setData(d => { const next = d.map(r => r.id === rid ? {...r, prov_fondos:(r.prov_fondos||[]).filter(p => p.id !== pid)} : r); const u = next.find(r => r.id === rid); if (u) guardarDebounced(u); return next; });
+
+  if (cargando) return <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"60vh",gap:16}}>
+    <div style={{width:40,height:40,border:"4px solid #e5e7eb",borderTop:"4px solid #6366f1",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
+    <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    <div style={{fontSize:14,color:"#6b7280",fontWeight:600}}>Cargando datos desde Supabase...</div>
+  </div>;
+
+  if (view === "login") return <LoginScreen
+    onLogin={u => { setSesion(u); setView("tabla"); }}
+    onPublic={() => setView("bodega")}
+  />;
+
+  const activas = data.filter(r => !r.cerrada);
+  const cerradas = data.filter(r => r.cerrada);
+  const filt = activas.filter(r => (fE==="TODOS" || r.trans_estado===fE) &&
+    (!search || r.proveedor?.toLowerCase().includes(search.toLowerCase()) || r.nro_oc?.toLowerCase().includes(search.toLowerCase())));
+  const cnt = {}; ESTADOS.forEach(e => { cnt[e] = activas.filter(r => r.trans_estado===e).length; });
+  const totAlarms = activas.reduce((s,r) => s + getAlarms(r).length, 0);
+
+  const VIEWS_PUBLICAS = [["bodega","📦 Bodega"],["calendario","📅 Calendario"]];
+  const VIEWS_PRIVADAS = [["tabla","📋 Gestión"],["alarmas","🔔 Alarmas"],["ranking","📊 Ranking"],["tiempos","⏱ Tiempos"],["cerradas","🔒 Cerradas"],["dicc","📖 Diccionario"],["forwarders","📞 Forwarders"]];
+
+  function CalView() {
+    const [yr, setYr] = useState(new Date().getFullYear());
+    const [mo, setMo] = useState(new Date().getMonth());
+    const [tab, setTab] = useState("fechas");
+    const MN = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+    const fd = new Date(yr,mo,1).getDay(); const dim = new Date(yr,mo+1,0).getDate(); const off = fd===0?6:fd-1;
+    const evs = {};
+    const ae = (ds, l, bg, tc) => { if (!ds) return; const [y,m,dv] = ds.split("-");
+      if (parseInt(y)===yr && parseInt(m)-1===mo) { const day=parseInt(dv); if (!evs[day]) evs[day]=[]; evs[day].push({l,bg,tc}); }};
+    activas.forEach(r => {
+      if (tab==="fechas") {
+        ae(r.trans_eta,`ETA ${r.proveedor}`,"#BAE6FD","#0C447C");
+        ae(r.llegada_fecha,`Llegada ${r.proveedor}`,"#BBF7D0","#166534");
+        ae(r.trans_etd,`ETD ${r.proveedor}`,"#E0E7FF","#3730a3");
+        ae(r.aduana_plazo,`Aduana ${r.proveedor}`,"#FEE2E2","#991b1b");
+      } else {
+        ae(r.fn_vto,`F.Nac ${r.proveedor}`,"#FEF3C7","#854F0B");
+        ae(r.fi_vto,`F.Int ${r.proveedor}`,"#E0E7FF","#3730a3");
+      }
+    });
+    const cells = []; for (let i=0;i<off;i++) cells.push(null); for (let dv=1;dv<=dim;dv++) cells.push(dv);
+    const today = yr===new Date().getFullYear()&&mo===new Date().getMonth()?new Date().getDate():-1;
+    return <div style={{background:"#fff",borderRadius:12,border:"1px solid #e5e7eb",padding:"14px"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,flexWrap:"wrap",gap:8}}>
+        <div style={{display:"flex",gap:3,background:"#f3f4f6",borderRadius:20,padding:3}}>
+          {[["fechas","Fechas proceso"],["pagos","Vencimientos"]].map(([k,l]) => (
+            <button key={k} onClick={()=>setTab(k)} style={{padding:"4px 10px",borderRadius:16,fontSize:11,background:tab===k?"#6366f1":"transparent",color:tab===k?"#fff":"#6b7280",border:"none",fontWeight:tab===k?700:400}}>{l}</button>
+          ))}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <button onClick={()=>{if(mo===0){setMo(11);setYr(y=>y-1);}else setMo(m=>m-1);}} style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:6,padding:"3px 10px",color:"#6b7280"}}>‹</button>
+          <span style={{fontWeight:700,fontSize:13,minWidth:130,textAlign:"center"}}>{MN[mo]} {yr}</span>
+          <button onClick={()=>{if(mo===11){setMo(0);setYr(y=>y+1);}else setMo(m=>m+1);}} style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:6,padding:"3px 10px",color:"#6b7280"}}>›</button>
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2,marginBottom:4}}>
+        {["Lu","Ma","Mi","Ju","Vi","Sa","Do"].map(d => <div key={d} style={{textAlign:"center",fontSize:11,fontWeight:700,color:"#9ca3af"}}>{d}</div>)}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2}}>
+        {cells.map((d,i) => <div key={i} style={{minHeight:54,borderRadius:6,padding:"2px 3px",background:d===today?"#EDE9FE":d&&evs[d]?"#f9fafb":"transparent",border:d===today?"1.5px solid #7F77DD":`1px solid ${d?"#f3f4f6":"transparent"}`}}>
+          {d && <div style={{fontSize:11,fontWeight:d===today?700:400,color:d===today?"#534AB7":"#6b7280"}}>{d}</div>}
+          {d && evs[d] && evs[d].slice(0,2).map((ev,ei) => <div key={ei} style={{fontSize:10,background:ev.bg,color:ev.tc,borderRadius:3,padding:"1px 3px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={ev.l}>{ev.l}</div>)}
+          {d && evs[d] && evs[d].length>2 && <div style={{fontSize:10,color:"#9ca3af"}}>+{evs[d].length-2}</div>}
+        </div>)}
+      </div>
+    </div>;
+  }
+
+  function BodegaView() {
+    const [srch, setSrch] = useState(""); const [ocu, setOcu] = useState(true);
+    const f2 = activas.filter(r => (!ocu || r.trans_estado!=="ENTREGADO") && (!srch || r.proveedor?.toLowerCase().includes(srch.toLowerCase())))
+      .sort((a,b) => (a.llegada_fecha||a.trans_eta||"9").localeCompare(b.llegada_fecha||b.trans_eta||"9"));
+    const prox = f2.filter(r => { const d=daysFrom(r.llegada_fecha||r.trans_eta); return d!==null&&d>=0&&d<=7; });
+    return <div>
+      <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
+        <input placeholder="Buscar..." value={srch} onChange={e=>setSrch(e.target.value)} style={{width:180}}/>
+        <label style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:"#6b7280",cursor:"pointer"}}>
+          <input type="checkbox" checked={ocu} onChange={e=>setOcu(e.target.checked)} style={{width:13,height:13}}/>Ocultar entregados
+        </label>
+      </div>
+      {prox.length > 0 && <div style={{background:"#FEF3C7",borderRadius:10,padding:"10px 14px",marginBottom:12,border:"1px solid #FCD34D"}}>
+        <div style={{fontWeight:700,fontSize:12,color:"#854F0B",marginBottom:4}}>⚠ {prox.length} llegada{prox.length>1?"s":""} próximas</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {prox.map(r => { const d=daysFrom(r.llegada_fecha||r.trans_eta); return <span key={r.id} style={{background:"#fff",border:"1px solid #FCD34D",borderRadius:8,padding:"3px 8px",fontSize:11,color:"#854F0B",fontWeight:600}}>
+            {r.proveedor} — {d===0?"Hoy":d===1?"Mañana":`${d}d`}</span>;})}
+        </div>
+      </div>}
+      <div style={{display:"grid",gap:8}}>
+        {f2.map(r => {
+          const packingDocs = (r.docs_packing||[]);
+          const allD = [...(r.docs_invoice||[]).map(f=>({...f,t:"Invoice"})),...packingDocs.map(f=>({...f,t:"Packing List"})),...(r.docs_bl||[]).map(f=>({...f,t:"BL"}))];
+          // En Bodega: siempre mostrar ETA como referencia de fecha, con nombre "Llegada a Chile"
+          const fechaRef = r.trans_eta || r.llegada_fecha;
+          const ds = fechaRef; const df=daysFrom(ds); const conf=!!r.llegada_fecha;
+          const cbg=conf?"#BBF7D0":df===null?"#f3f4f6":df<=3?"#FEE2E2":df<=7?"#FEF3C7":"#EDE9FE";
+          const ctc=conf?"#166534":df===null?"#6b7280":df<=3?"#991B1B":df<=7?"#854F0B":"#3730a3";
+          const cl2=conf?"Confirmada":df===null?"—":df<0?`Hace ${Math.abs(df)}d`:df===0?"Hoy":df===1?"Mañana":`En ${df}d`;
+          const etaLabel=conf?`Llegada a Chile el ${fmt(r.llegada_fecha)}`:`Llegada a Chile est. ${fmt(r.trans_eta)}`;
+          return <div key={r.id} style={{background:"#fff",borderRadius:10,border:"1px solid #e5e7eb",padding:"12px 14px"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,marginBottom:6}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                <span style={{fontWeight:700,fontSize:14}}>{r.proveedor}</span>
+                {r.nro_oc && <span style={{background:"#F5F3FF",color:"#5B21B6",fontSize:11,fontWeight:600,padding:"1px 7px",borderRadius:99}}>{r.nro_oc}</span>}
+                {r.contenedor && <span style={{background:"#E0E7FF",color:"#3730a3",fontSize:11,fontWeight:600,padding:"1px 7px",borderRadius:99}}>{r.contenedor}</span>}
+                {r.origen && <span style={{background:"#F0FDF4",color:"#166534",fontSize:11,fontWeight:600,padding:"1px 7px",borderRadius:99}}>{r.origen}</span>}
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:13,fontWeight:700,color:conf?"#166534":"#374151"}}>{etaLabel}</div>
+                  <div style={{fontSize:10,color:"#9ca3af"}}>{conf?"Real":"Estimada"}</div>
+                </div>
+                <span style={{background:cbg,color:ctc,fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:99}}>{cl2}</span>
+              </div>
+            </div>
+            {r.detalle_mercaderia && <div style={{background:"#f9fafb",borderRadius:6,padding:"5px 10px",marginBottom:6,fontSize:12}}><span style={{color:"#9ca3af",marginRight:4}}>Mercadería:</span>{r.detalle_mercaderia}</div>}
+            <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:allD.length>0?6:0}}>
+              {[["Inv",r.invoice_ok],["P/L",r.packing_ok],["BL",r.bl_ok],
+                r.origen==="USA"?["N/A",null]:esEuropa(r.origen)?["REX",r.rex_en_invoice]:["C.O.",r.cert_origen],
+                ["D.M.",r.detalle_merc]].map(([l,ok]) => (
+                ok===null ? <span key={l} style={{fontSize:11,padding:"2px 6px",borderRadius:5,background:"#f3f4f6",color:"#9ca3af"}}>{l}</span>
+                : <span key={l} style={{fontSize:11,padding:"2px 6px",borderRadius:5,fontWeight:ok?700:400,background:ok?"#BBF7D0":"#f3f4f6",color:ok?"#166534":"#9ca3af"}}>{ok?"✓ ":""}{l}</span>
+              ))}
+            </div>
+            {allD.length>0 && <div style={{borderTop:"1px solid #f3f4f6",paddingTop:8,marginTop:4}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#6b7280",marginBottom:6}}>📎 Archivos adjuntos</div>
+              <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                {allD.map((f,i) => {
+                  const isPL = f.t==="Packing List";
+                  const href = f.url || f.data || "#";
+                  return <div key={i} style={{display:"flex",alignItems:"center",gap:2,background:isPL?"#F0FDF4":"#eff6ff",border:`1px solid ${isPL?"#86EFAC":"#bfdbfe"}`,borderRadius:6,padding:"3px 6px"}}>
+                    <span style={{fontSize:11,fontWeight:isPL?700:400,color:isPL?"#166534":"#1e40af"}}>{isPDF?"📄":isImg?"🖼":"📎"} {f.t}</span>
+                    <span style={{fontSize:10,color:"#6b7280",maxWidth:100,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={f.name}>{f.name.length>12?f.name.substring(0,12)+"…":f.name}</span>
+                    <a href={f.url||f.data||"#"} target="_blank" rel="noopener noreferrer" title="Abrir en OneDrive" style={{fontSize:11,color:"#2563eb",padding:"0 2px"}}>🔗</a>
+                    <a href={f.data} download={f.name} title="Descargar" style={{fontSize:11,color:"#6b7280",padding:"0 2px"}}>⬇</a>
+                  </div>;
+                })}
+              </div>
+            </div>}
+            {r.packing_url && <div style={{borderTop:"1px solid #f3f4f6",paddingTop:8,marginTop:4,display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:11,fontWeight:700,color:"#166534"}}>📦 Packing List</span>
+              <a href={r.packing_url} target="_blank" rel="noopener noreferrer"
+                style={{fontSize:11,background:"#F0FDF4",border:"1px solid #86EFAC",borderRadius:6,padding:"3px 12px",color:"#166534",fontWeight:700,display:"inline-flex",alignItems:"center",gap:4}}>
+                👁 Ver Packing List
+              </a>
+            </div>}
+          </div>;
+        })}
+      </div>
+    </div>;
+  }
+
+  function AlarmsView() {
+    const all = [];
+    activas.forEach(r => getAlarms(r).forEach(a => all.push({...a, proveedor:r.proveedor, nro_oc:r.nro_oc})));
+    all.sort((a,b) => a.d - b.d);
+    if (all.length===0) return <div style={{background:"#f0fdf4",borderRadius:10,padding:"14px",border:"1px solid #86EFAC",color:"#166534",fontWeight:700}}>✓ Sin vencimientos próximos</div>;
+    return <div style={{display:"grid",gap:8}}>
+      {all.map((a,i) => {
+        const bg = a.d<=2?"#FEE2E2":a.color||"#FEF3C7"; const tc = a.d<=2?"#991B1B":"#854F0B";
+        const lbl = a.d<0?`Vencida hace ${Math.abs(a.d)}d`:a.d===0?"Vence HOY":a.d===1?"Mañana":`${a.d}d`;
+        return <div key={i} style={{background:bg,borderRadius:8,padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:6}}>
+          <div>
+            <span style={{fontWeight:700,color:tc,fontSize:13}}>{a.proveedor}</span>
+            {a.nro_oc && <span style={{fontSize:11,color:tc,marginLeft:6}}>({a.nro_oc})</span>}
+            <div style={{fontSize:12,color:tc,marginTop:2}}>{a.l} · plazo: {fmt(a.v)}</div>
+          </div>
+          <span style={{background:tc,color:"#fff",fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:99}}>{lbl}</span>
+        </div>;
+      })}
+    </div>;
+  }
+
+  function RankingView() {
+    const sorted = activas.map(r => ({...r, _ini:r.trans_etd||r.pf_fecha_cot||""}))
+      .filter(r => r._ini).sort((a,b) => a._ini.localeCompare(b._ini));
+    return <div style={{background:"#fff",borderRadius:12,border:"1px solid #e5e7eb",padding:"14px"}}>
+      <div style={{fontSize:15,fontWeight:700,marginBottom:2}}>📊 Ranking por antigüedad</div>
+      <div style={{fontSize:12,color:"#6b7280",marginBottom:12}}>#1 = más antigua = mayor atención</div>
+      <div style={{display:"grid",gap:8}}>
+        {sorted.map((r,i) => {
+          const d = Math.ceil((new Date() - new Date(r._ini)) / 864e5);
+          const color = i===0?"#EF4444":i<=2?"#F97316":i<=5?"#EAB308":"#22C55E";
+          const al = getAlarms(r); const p = getProg(r);
+          return <div key={r.id} style={{display:"flex",alignItems:"center",gap:10,background:"#f9fafb",borderRadius:8,padding:"10px 12px",border:`1.5px solid ${color}40`}}>
+            <div style={{width:28,height:28,borderRadius:99,background:color,color:"#fff",fontSize:13,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{i+1}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:4}}>
+                <span style={{fontWeight:700,fontSize:13}}>{r.proveedor}</span>
+                {r.nro_oc && <span style={{fontSize:11,background:"#F5F3FF",color:"#5B21B6",padding:"1px 6px",borderRadius:99}}>{r.nro_oc}</span>}
+                <Bdg e={r.trans_estado}/>
+                {al.length>0 && <span style={{fontSize:11,background:"#FEE2E2",color:"#991B1B",padding:"1px 6px",borderRadius:99,fontWeight:700}}>🔔 {al.length}</span>}
+              </div>
+              <div style={{display:"flex",gap:1,marginBottom:2}}>
+                {STEPS.map((_,i2) => <div key={i2} style={{flex:1,height:5,borderRadius:2,background:i2<p?"#6366f1":i2===p?"#a5b4fc":"#e5e7eb"}}/>)}
+              </div>
+              <div style={{fontSize:10,color:"#9ca3af"}}>{STEPS[p]?.l} · {d} días</div>
+            </div>
+            <div style={{textAlign:"right",flexShrink:0}}><div style={{fontSize:14,fontWeight:700,color}}>{d}d</div></div>
+          </div>;
+        })}
+      </div>
+    </div>;
+  }
+
+  function TiemposView() {
+    const [tab, setTab] = useState("activas");
+    const lista = tab === "activas" ? activas : cerradas;
+    const calcTramos = r => {
+      const t1 = (r.pf_fecha_cot && r.pf_fecha_conf) ? Math.ceil((new Date(r.pf_fecha_conf)-new Date(r.pf_fecha_cot))/864e5) : null;
+      const t2 = (r.pf_fecha_conf && r.llegada_fecha) ? Math.ceil((new Date(r.llegada_fecha)-new Date(r.pf_fecha_conf))/864e5) : null;
+      const t3 = (r.llegada_fecha && r.pf_fecha_envio) ? Math.ceil((new Date(r.pf_fecha_envio)-new Date(r.llegada_fecha))/864e5) : null;
+      const total = (r.pf_fecha_cot && r.pf_fecha_envio) ? Math.ceil((new Date(r.pf_fecha_envio)-new Date(r.pf_fecha_cot))/864e5) : null;
+      return {t1,t2,t3,total};
+    };
+    const conDatos = lista.filter(r => r.pf_fecha_cot || r.llegada_fecha || r.pf_fecha_envio);
+    return <div>
+      <div style={{fontSize:15,fontWeight:700,marginBottom:2}}>⏱ Tiempos por tramo</div>
+      <div style={{fontSize:12,color:"#6b7280",marginBottom:10}}>Duración de cada etapa del proceso de importación.</div>
+      <div style={{display:"flex",gap:4,background:"#f3f4f6",borderRadius:20,padding:3,marginBottom:14,width:"fit-content"}}>
+        {[["activas","Activas"],["cerradas","Cerradas"]].map(([k,l]) => (
+          <button key={k} onClick={()=>setTab(k)} style={{padding:"4px 14px",borderRadius:16,fontSize:11,background:tab===k?"#6366f1":"transparent",color:tab===k?"#fff":"#6b7280",border:"none",fontWeight:tab===k?700:400}}>{l}</button>
+        ))}
+      </div>
+      <div style={{display:"grid",gap:6,marginBottom:12}}>
+        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr",gap:6,padding:"6px 10px",background:"#f9fafb",borderRadius:8,fontWeight:700,fontSize:11,color:"#6b7280"}}>
+          <div>Importación</div>
+          <div style={{textAlign:"center"}}>📋→✅<br/><span style={{fontSize:10,fontWeight:400}}>Cotiz. → Confirm.</span></div>
+          <div style={{textAlign:"center"}}>✅→📦<br/><span style={{fontSize:10,fontWeight:400}}>Confirm. → Llegada</span></div>
+          <div style={{textAlign:"center"}}>📦→🧾<br/><span style={{fontSize:10,fontWeight:400}}>Llegada → OC</span></div>
+          <div style={{textAlign:"center"}}>⏱ Total</div>
+        </div>
+        {conDatos.length === 0 && <div style={{textAlign:"center",padding:30,color:"#9ca3af",fontSize:13}}>Sin fechas registradas aún.</div>}
+        {conDatos.map(r => {
+          const {t1,t2,t3,total} = calcTramos(r);
+          const colorT = n => n===null?"#9ca3af":n<=5?"#166534":n<=15?"#854F0B":"#991B1B";
+          const bgT = n => n===null?"#f3f4f6":n<=5?"#DCFCE7":n<=15?"#FEF3C7":"#FEE2E2";
+          return <div key={r.id} style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr",gap:6,padding:"8px 10px",background:"#fff",borderRadius:8,border:"1px solid #e5e7eb",alignItems:"center"}}>
+            <div>
+              <div style={{fontWeight:700,fontSize:12}}>{r.proveedor||"—"}</div>
+              {r.nro_oc && <span style={{fontSize:10,background:"#F5F3FF",color:"#5B21B6",padding:"1px 6px",borderRadius:99}}>{r.nro_oc}</span>}
+            </div>
+            {[t1,t2,t3].map((v,i) => <div key={i} style={{textAlign:"center",background:bgT(v),borderRadius:6,padding:"4px",color:colorT(v),fontWeight:700,fontSize:12}}>
+              {v!==null?`${v}d`:"—"}
+            </div>)}
+            <div style={{textAlign:"center",background:total!==null?"#EDE9FE":"#f3f4f6",borderRadius:6,padding:"4px",color:total!==null?"#4338ca":"#9ca3af",fontWeight:700,fontSize:13}}>
+              {total!==null?`${total}d`:"—"}
+            </div>
+          </div>;
+        })}
+      </div>
+      <div style={{fontSize:11,color:"#9ca3af",padding:"6px 10px",background:"#f9fafb",borderRadius:8}}>
+        🟢 ≤5d · 🟡 ≤15d · 🔴 &gt;15d · Los tiempos se calculan automáticamente con las fechas ingresadas.
+      </div>
+    </div>;
+  }
+
+  function DiccView() {
+    const [q, setQ] = useState(""); const [editing, setEditing] = useState(null);
+    const [newT, setNewT] = useState(""); const [newD, setNewD] = useState(""); const [showAdd, setShowAdd] = useState(false);
+    const items = q ? dicc.filter(d => d.t.toLowerCase().includes(q.toLowerCase()) || d.d.toLowerCase().includes(q.toLowerCase())) : dicc;
+    const saveEdit = i => { setDicc(d => d.map((x,idx) => idx===i ? {t:x._et||x.t,d:x._ed||x.d} : x)); setEditing(null); };
+    const startEdit = i => { setDicc(d => d.map((x,idx) => idx===i ? {...x,_et:x.t,_ed:x.d} : x)); setEditing(i); };
+    const delTerm = i => setDicc(d => d.filter((_,idx) => idx!==i));
+    const addTerm = () => { if (!newT.trim()) return; setDicc(d => [...d,{t:newT.trim(),d:newD.trim()}]); setNewT(""); setNewD(""); setShowAdd(false); };
+    return <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,flexWrap:"wrap",gap:8}}>
+        <div><div style={{fontSize:15,fontWeight:700}}>📖 Diccionario</div><div style={{fontSize:12,color:"#6b7280"}}>Editable</div></div>
+        <button onClick={()=>setShowAdd(s=>!s)} style={{padding:"6px 14px",borderRadius:8,background:"#6366f1",color:"#fff",border:"none",fontSize:12,fontWeight:700}}>+ Agregar</button>
+      </div>
+      {showAdd && <div style={{background:"#EDE9FE",borderRadius:10,border:"1px solid #a5b4fc",padding:"12px",marginBottom:12}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:8,marginBottom:8}}>
+          <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Término</div><input value={newT} onChange={e=>setNewT(e.target.value)} placeholder="Ej: FOB"/></div>
+          <div><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Definición</div><input value={newD} onChange={e=>setNewD(e.target.value)} placeholder="Explicación..."/></div>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={addTerm} style={{padding:"5px 14px",borderRadius:6,background:"#6366f1",color:"#fff",border:"none",fontSize:12,fontWeight:700}}>Guardar</button>
+          <button onClick={()=>{setShowAdd(false);setNewT("");setNewD("");}} style={{padding:"5px 14px",borderRadius:6,background:"#fff",color:"#6b7280",border:"1px solid #d1d5db",fontSize:12}}>Cancelar</button>
+        </div>
+      </div>}
+      <input placeholder="Buscar..." value={q} onChange={e=>setQ(e.target.value)} style={{marginBottom:12,maxWidth:300}}/>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:8}}>
+        {items.map((d,i) => { const ri = dicc.indexOf(d); return editing===ri ? (
+          <div key={ri} style={{background:"#fff",borderRadius:10,border:"2px solid #6366f1",padding:"12px"}}>
+            <div style={{marginBottom:6}}><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Término</div>
+              <input value={d._et||d.t} onChange={e=>setDicc(dv=>dv.map((x,idx)=>idx===ri?{...x,_et:e.target.value}:x))}/></div>
+            <div style={{marginBottom:8}}><div style={{fontSize:11,color:"#6b7280",marginBottom:2,fontWeight:600}}>Definición</div>
+              <textarea rows={3} value={d._ed||d.d} onChange={e=>setDicc(dv=>dv.map((x,idx)=>idx===ri?{...x,_ed:e.target.value}:x))} style={{resize:"vertical"}}/></div>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={()=>saveEdit(ri)} style={{padding:"4px 12px",borderRadius:6,background:"#6366f1",color:"#fff",border:"none",fontSize:11,fontWeight:700}}>✓ Guardar</button>
+              <button onClick={()=>{setEditing(null);setDicc(dv=>dv.map((x,idx)=>idx===ri?{t:x.t,d:x.d}:x));}} style={{padding:"4px 12px",borderRadius:6,background:"#fff",color:"#6b7280",border:"1px solid #d1d5db",fontSize:11}}>Cancelar</button>
+            </div>
+          </div>
+        ) : (
+          <div key={ri} style={{background:"#fff",borderRadius:10,border:"1px solid #e5e7eb",padding:"12px"}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:6,marginBottom:4}}>
+              <div style={{fontSize:13,fontWeight:700,color:"#4338ca"}}>{d.t}</div>
+              <div style={{display:"flex",gap:4,flexShrink:0}}>
+                <button onClick={()=>startEdit(ri)} style={{background:"none",border:"none",color:"#6366f1",fontSize:13,padding:"0 3px"}}>✏️</button>
+                <button onClick={()=>delTerm(ri)} style={{background:"none",border:"none",color:"#ef4444",fontSize:13,padding:"0 3px"}}>✕</button>
+              </div>
+            </div>
+            <div style={{fontSize:12,color:"#374151",lineHeight:1.5}}>{d.d}</div>
+          </div>
+        );})}
+      </div>
+    </div>;
+  }
+
+  function CerradasView() {
+    const [srch, setSrch] = useState(""); const [expC, setExpC] = useState(null);
+    const filtC = cerradas.filter(r => !srch ||
+      r.proveedor?.toLowerCase().includes(srch.toLowerCase()) ||
+      r.nro_oc?.toLowerCase().includes(srch.toLowerCase()) ||
+      r.fd_nro?.toLowerCase().includes(srch.toLowerCase()));
+    return <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,flexWrap:"wrap",gap:8}}>
+        <div style={{fontSize:14,fontWeight:700,color:"#6b7280"}}>🔒 Cerradas ({cerradas.length})</div>
+        <input placeholder="Buscar proveedor, N° OC o Dimasoft..." value={srch} onChange={e=>setSrch(e.target.value)} style={{width:280}}/>
+      </div>
+      {filtC.length===0 ? <div style={{textAlign:"center",padding:40,color:"#9ca3af"}}>No se encontraron importaciones cerradas.</div>
+        : <div style={{display:"grid",gap:8}}>
+          {filtC.map(r => { const isE=expC===r.id; const p=getProg(r); return (
+            <div key={r.id} style={{background:"#fff",borderRadius:10,border:"1px solid #e5e7eb",overflow:"hidden"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,padding:"10px 14px",cursor:"pointer",background:isE?"#f5f3ff":"#fff"}} onClick={()=>setExpC(isE?null:r.id)}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                  <span style={{fontSize:13,color:"#9ca3af"}}>{isE?"▼":"▶"}</span>
+                  <span style={{fontWeight:700,fontSize:14}}>{r.proveedor}</span>
+                  {r.nro_oc && <span style={{background:"#F5F3FF",color:"#5B21B6",fontSize:11,fontWeight:600,padding:"1px 7px",borderRadius:99}}>{r.nro_oc}</span>}
+                  {r.fd_nro && <span style={{background:"#FFF7ED",color:"#854F0B",fontSize:11,fontWeight:600,padding:"1px 7px",borderRadius:99}}>DS:{r.fd_nro}</span>}
+                  {r.dias_proceso && <span style={{background:"#EDE9FE",color:"#4338ca",fontSize:11,fontWeight:600,padding:"1px 7px",borderRadius:99}}>⏱ {r.dias_proceso}d</span>}
+                  {r.dias_transito && <span style={{background:"#CFFAFE",color:"#0e7490",fontSize:11,fontWeight:600,padding:"1px 7px",borderRadius:99}}>🚢 {r.dias_transito}d</span>}
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{display:"flex",gap:1}}>
+                    {STEPS.map((_,i) => <div key={i} style={{width:14,height:5,borderRadius:2,background:i<p?"#6366f1":i===p?"#a5b4fc":"#e5e7eb"}}/>)}
+                  </div>
+                  <button onClick={e=>{e.stopPropagation();toggleC(r.id);}} style={{fontSize:11,padding:"3px 10px",borderRadius:6,border:"1px solid #6366f1",background:"#EDE9FE",color:"#4338ca"}}>↩ Reactivar</button>
+                </div>
+              </div>
+              {isE && <div style={{background:"#f5f3ff",borderTop:"1px solid #e5e7eb"}}>
+                <RowDetail row={r} upd={upd} addDoc={addDoc} rmDoc={rmDoc} addProv={addProv} updProv={updProv} delProv={delProv} toggleC={toggleC} delRow={delRow} isGestion={false}/>
+              </div>}
+            </div>
+          );})}
+        </div>}
+    </div>;
+  }
+
+  return <div style={{width:"100%",maxWidth:"100%"}}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}}>
+      <div>
+        <h1 style={{fontSize:18,fontWeight:700}}>Seguimiento de Importaciones</h1>
+        <p style={{fontSize:12,color:"#6b7280",margin:0}}>{sesion ? `👤 ${sesion}` : "Vista pública"}</p>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        {sesion && <button onClick={()=>{setSesion(null);setView("bodega");}}
+          style={{fontSize:11,padding:"4px 12px",borderRadius:6,border:"1px solid #d1d5db",background:"#fff",color:"#6b7280"}}>
+          Cerrar sesión
+        </button>}
+        {!sesion && <button onClick={()=>setView("login")}
+          style={{fontSize:11,padding:"4px 12px",borderRadius:6,border:"none",background:"#6366f1",color:"#fff",fontWeight:700}}>
+          🔐 Ingresar
+        </button>}
+        {errorConex && <span style={{fontSize:11,background:"#FEE2E2",color:"#991B1B",padding:"3px 10px",borderRadius:99,fontWeight:600}}>⚠ Sin conexión</span>}
+        {!errorConex && guardando && <span style={{fontSize:11,background:"#FEF3C7",color:"#854F0B",padding:"3px 10px",borderRadius:99,fontWeight:600}}>💾 Guardando...</span>}
+        {!errorConex && !guardando && sesion && <span style={{fontSize:11,background:"#DCFCE7",color:"#166534",padding:"3px 10px",borderRadius:99,fontWeight:600}}>✓ Guardado</span>}
+        <div style={{display:"flex",gap:3,background:"#e5e7eb",borderRadius:22,padding:3,flexWrap:"wrap"}}>
+          {VIEWS_PUBLICAS.map(([k,l]) => (
+            <button key={k} onClick={()=>setView(k)} style={{padding:"5px 11px",borderRadius:20,fontSize:11,background:view===k?"#6366f1":"transparent",color:view===k?"#fff":"#6b7280",border:"none",fontWeight:view===k?700:400}}>{l}</button>
+          ))}
+          {sesion && VIEWS_PRIVADAS.map(([k,l]) => (
+            <button key={k} onClick={()=>setView(k)} style={{padding:"5px 11px",borderRadius:20,fontSize:11,background:view===k?"#6366f1":"transparent",color:view===k?"#fff":"#6b7280",border:"none",fontWeight:view===k?700:400,position:"relative"}}>
+              {l}{k==="alarmas" && totAlarms>0 && <span style={{position:"absolute",top:-3,right:-2,background:"#EF4444",color:"#fff",borderRadius:99,fontSize:9,fontWeight:700,padding:"0 4px",lineHeight:"14px"}}>{totAlarms}</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+      {[{l:"Activas",v:activas.length,bg:"#f3f4f6",tc:"#374151"},
+        {l:"Producción",v:cnt["EN PRODUCCIÓN"]||0,bg:"#FEF08A",tc:"#713F12"},
+        {l:"Tránsito",v:(cnt["EN TRÁNSITO"]||0)+(cnt["BOOKING CONFIRMADO"]||0),bg:"#A5F3FC",tc:"#0F6E56"},
+        {l:"Aduana",v:cnt["EN ADUANA"]||0,bg:"#FED7AA",tc:"#854F0B"},
+        {l:"Entregados",v:cnt["ENTREGADO"]||0,bg:"#BBF7D0",tc:"#166534"},
+        {l:"Cerradas",v:cerradas.length,bg:"#F3F4F6",tc:"#6b7280"},
+      ].map(k => <div key={k.l} style={{background:k.bg,borderRadius:8,padding:"5px 14px",minWidth:75,textAlign:"center",border:"1px solid #e5e7eb"}}>
+        <div style={{fontSize:20,fontWeight:700,color:k.tc}}>{k.v}</div>
+        <div style={{fontSize:11,color:k.tc}}>{k.l}</div>
+      </div>)}
+    </div>
+
+    {view==="bodega" && <BodegaView/>}
+    {view==="calendario" && <CalView/>}
+    {sesion && view==="alarmas" && <div><div style={{fontSize:14,fontWeight:700,marginBottom:10}}>🔔 Alarmas y plazos</div><AlarmsView/></div>}
+    {sesion && view==="ranking" && <RankingView/>}
+    {sesion && view==="tiempos" && <TiemposView/>}
+    {sesion && view==="dicc" && <DiccView/>}
+    {sesion && view==="cerradas" && <CerradasView/>}
+    {sesion && view==="forwarders" && <ForwarderView/>}
+
+    {sesion && view==="tabla" && <>
+      <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
+        <input placeholder="Buscar proveedor o N° OC..." value={search} onChange={e=>setSearch(e.target.value)} style={{width:220}}/>
+        <select value={fE} onChange={e=>setFE(e.target.value)} style={{width:"auto"}}>
+          <option value="TODOS">Todos los estados</option>
+          {ESTADOS.map(e => <option key={e}>{e}</option>)}
+        </select>
+        <button onClick={addRow} style={{marginLeft:"auto",padding:"6px 14px",borderRadius:6,background:"#6366f1",color:"#fff",border:"none",fontSize:12,fontWeight:700}}>+ Nueva importación</button>
+      </div>
+      <div style={{overflowX:"auto",borderRadius:10,border:"1px solid #e5e7eb",background:"#fff"}}>
+        <table style={{width:"100%"}}>
+          <thead>
+            <tr style={{background:"#f9fafb",borderBottom:"2px solid #e5e7eb"}}>
+              {["","Proveedor","N° OC","Origen","Contenedor","Estado","ETD","ETA","Progreso","Docs","Llegada","🔔",""].map((h,i) => (
+                <th key={i} style={{padding:"7px 9px",textAlign:"left",fontSize:11,fontWeight:700,color:"#6b7280",whiteSpace:"nowrap"}}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filt.map((row,idx) => {
+              const p = getProg(row); const isE = expR===row.id;
+              const dc = [row.invoice_ok,row.packing_ok,row.bl_ok,row.detalle_merc,
+                row.origen==="USA"?true:esEuropa(row.origen)?row.rex_en_invoice:row.cert_origen].filter(Boolean).length;
+              const al = getAlarms(row);
+              return <React.Fragment key={row.id}>
+                <tr style={{borderBottom:"1px solid #f3f4f6",background:idx%2===0?"#fff":"#fafafa",cursor:"pointer"}} onClick={()=>setExpR(isE?null:row.id)}>
+                  <td style={{padding:"6px 8px",color:"#9ca3af",fontSize:11}}>{isE?"▼":"▶"}</td>
+                  <td style={{padding:"6px 9px",fontWeight:700,whiteSpace:"nowrap"}}>{row.proveedor||<span style={{color:"#9ca3af"}}>—</span>}</td>
+                  <td style={{padding:"6px 9px"}}>{row.nro_oc?<span style={{background:"#F5F3FF",color:"#5B21B6",fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:99}}>{row.nro_oc}</span>:<span style={{color:"#9ca3af"}}>—</span>}</td>
+                  <td style={{padding:"6px 9px"}}>{row.origen?<span style={{background:"#F0FDF4",color:"#166534",fontSize:11,fontWeight:600,padding:"2px 7px",borderRadius:99}}>{row.origen}</span>:<span style={{color:"#9ca3af"}}>—</span>}</td>
+                  <td style={{padding:"6px 9px"}}>{row.contenedor?<span style={{background:"#E0E7FF",color:"#3730a3",fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:99}}>{row.contenedor}</span>:<span style={{color:"#9ca3af"}}>—</span>}</td>
+                  <td style={{padding:"6px 9px"}}><Bdg e={row.trans_estado}/></td>
+                  <td style={{padding:"6px 9px",fontSize:12,color:"#6b7280"}}>{fmt(row.trans_etd)}</td>
+                  <td style={{padding:"6px 9px",fontSize:12,color:"#6b7280"}}>{fmt(row.trans_eta)}</td>
+                  <td style={{padding:"6px 9px",minWidth:150,cursor:"pointer"}} onClick={e=>{e.stopPropagation();setShowProg(s=>({...s,[row.id]:!s[row.id]}));}}>
+                    <div style={{display:"flex",gap:1,marginBottom:2}}>
+                      {STEPS.map((_,i) => <div key={i} style={{flex:1,height:6,borderRadius:2,background:i<p?"#6366f1":i===p?"#a5b4fc":"#e5e7eb"}}/>)}
+                    </div>
+                    <div style={{fontSize:10,color:"#6366f1",fontWeight:600}}>{p+1}. {STEPS[p]?.l} · detalle</div>
+                  </td>
+                  <td style={{padding:"6px 9px"}}><span style={{fontSize:12,fontWeight:700,color:dc===5?"#166534":dc>0?"#854F0B":"#9ca3af"}}>{dc}/5</span></td>
+                  <td style={{padding:"6px 9px",fontSize:12,color:row.llegada_fecha?"#166534":"#9ca3af",fontWeight:row.llegada_fecha?700:400}}>
+                    {row.llegada_fecha?fmt(row.llegada_fecha):row.trans_eta?`Est. ${fmt(row.trans_eta)}`:"—"}</td>
+                  <td style={{padding:"6px 9px"}}>{al.length>0 && <span style={{background:"#FEE2E2",color:"#991B1B",fontSize:11,fontWeight:700,padding:"1px 7px",borderRadius:99}}>🔔 {al.length}</span>}</td>
+                  <td style={{padding:"6px 8px"}} onClick={e=>e.stopPropagation()}>
+                    <button onClick={()=>toggleC(row.id)} title="Cerrar" style={{background:"none",border:"none",color:"#6b7280",fontSize:13,padding:"0 3px"}}>🔒</button>
+                    <button onClick={()=>delRow(row.id)} style={{background:"none",border:"none",color:"#ef4444",fontSize:13,padding:"0 3px"}}>✕</button>
+                  </td>
+                </tr>
+                {showProg[row.id] && !isE && <tr><td colSpan={13} style={{padding:0,background:"#f8f7ff"}}>
+                  <div style={{padding:"10px 14px"}}><ProgBar step={p} expanded={true}/></div>
+                </td></tr>}
+                {isE && <tr><td colSpan={13} style={{padding:0,background:"#f5f3ff",borderBottom:"2px solid #e5e7eb"}}>
+                  <RowDetail row={row} upd={upd} addDoc={addDoc} rmDoc={rmDoc} addProv={addProv} updProv={updProv} delProv={delProv} toggleC={toggleC} delRow={delRow} isGestion={true}/>
+                </td></tr>}
+              </React.Fragment>;
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p style={{marginTop:6,fontSize:11,color:"#9ca3af"}}>{filt.length} de {activas.length} importaciones activas</p>
+    </>}
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
